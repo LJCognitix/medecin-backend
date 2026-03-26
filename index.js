@@ -15,9 +15,13 @@ const compteRenduRoutes = require('./routes/compteRendu');
 const app = express();
 
 app.use(cors({
-  origin: '*',
+  origin: [
+    'https://medecin-front-eight.vercel.app',
+    'http://localhost:5173',
+    'http://localhost:3000',
+  ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 app.use(express.json());
 

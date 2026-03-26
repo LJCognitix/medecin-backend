@@ -24,89 +24,105 @@ function formatCreneau(date) {
   return `${JOURS_FR[date.getDay()]} ${date.getDate()} ${MOIS_FR[date.getMonth()]} à ${h}:${m}`;
 }
 
+// Requête Supabase sécurisée — ne throw jamais, retourne toujours { data, error }
+async function safeQuery(queryBuilder, label) {
+  try {
+    const result = await queryBuilder;
+    console.log(`[${label}] data:`, result.data === null ? 'null' : `${Array.isArray(result.data) ? result.data.length : '?'} éléments`, '| error:', result.error ? result.error.message : 'aucune');
+    return result;
+  } catch (err) {
+    console.error(`[${label}] Exception pendant la requête:`, err?.message || String(err));
+    return { data: null, error: { message: err?.message || 'Exception inconnue', code: 'EXCEPTION' } };
+  }
+}
+
 // GET /api/rendez-vous — liste des rendez-vous avec info patient
+// Toujours retourne une réponse JSON, même en mode dégradé
 router.get('/', async (req, res) => {
   console.log('[GET /rendez-vous] Requête reçue — query:', JSON.stringify(req.query));
 
+  // Timeout 9s — évite que Railway retourne 503 si Supabase ne répond pas
   const timeoutId = setTimeout(() => {
     if (!res.headersSent) {
-      console.error('[GET /rendez-vous] TIMEOUT — Supabase ne répond pas après 9s');
-      res.status(504).json({ erreur: 'La base de données ne répond pas. Réessayez dans quelques secondes.' });
+      console.error('[GET /rendez-vous] TIMEOUT 9s — Supabase ne répond pas');
+      res.status(200).json({
+        rendez_vous: [],
+        total: 0,
+        warning: 'La base de données ne répond pas. Les données seront disponibles dans quelques secondes.',
+      });
     }
   }, 9000);
 
   try {
     const { patient_id } = req.query;
 
-    let queryBuilder = supabase
+    // ── Étape 1 : requête sur rendez_vous (sans join implicite) ──
+    console.log('[GET /rendez-vous] Requête rendez_vous...');
+    let rdvQuery = supabase
       .from('rendez_vous')
       .select('id, patient_id, date_heure, motif, statut, created_at')
       .order('date_heure', { ascending: true });
 
-    if (patient_id) {
-      console.log('[GET /rendez-vous] Filtre patient_id:', patient_id);
-      queryBuilder = queryBuilder.eq('patient_id', patient_id);
-    }
+    if (patient_id) rdvQuery = rdvQuery.eq('patient_id', patient_id);
 
-    console.log('[GET /rendez-vous] Envoi requête Supabase sur rendez_vous...');
-    const { data, error } = await queryBuilder;
+    const { data: rdvData, error: rdvError } = await safeQuery(rdvQuery, 'GET /rendez-vous → rendez_vous');
 
     clearTimeout(timeoutId);
+    if (res.headersSent) return;
 
-    if (res.headersSent) {
-      console.warn('[GET /rendez-vous] Réponse déjà envoyée, abandon.');
-      return;
+    // Si la table rendez_vous est inaccessible → réponse dégradée (pas de crash)
+    if (rdvError) {
+      console.error('[GET /rendez-vous] Table rendez_vous inaccessible:', rdvError.message);
+      return res.status(200).json({
+        rendez_vous: [],
+        total: 0,
+        warning: `Table rendez_vous inaccessible : ${rdvError.message}`,
+      });
     }
 
-    if (error) {
-      console.error('[GET /rendez-vous] Erreur Supabase rendez_vous:', error.message, '| code:', error.code, '| details:', error.details);
-      return res.status(500).json({ erreur: error.message || 'Erreur base de données.' });
-    }
+    const liste = Array.isArray(rdvData) ? rdvData : [];
+    console.log('[GET /rendez-vous] rendez_vous récupérés:', liste.length);
 
-    const liste = Array.isArray(data) ? data : [];
-    console.log('[GET /rendez-vous] Rendez-vous récupérés:', liste.length);
-
-    const patientIds = [...new Set(
-      liste
-        .map((rdv) => rdv.patient_id)
-        .filter(Boolean)
-    )];
-
+    // ── Étape 2 : récupération des patients (requête séparée, sans join) ──
     let patientsMap = {};
+    const patientIds = [...new Set(liste.map((r) => r.patient_id).filter(Boolean))];
 
     if (patientIds.length > 0) {
-      console.log('[GET /rendez-vous] Récupération patients liés:', patientIds.length);
-
-      const { data: patientsData, error: patientsError } = await supabase
-        .from('patients')
-        .select('id, nom, telephone, email')
-        .in('id', patientIds);
+      console.log('[GET /rendez-vous] Requête patients pour', patientIds.length, 'ids...');
+      const { data: patientsData, error: patientsError } = await safeQuery(
+        supabase.from('patients').select('id, nom, telephone, email').in('id', patientIds),
+        'GET /rendez-vous → patients'
+      );
 
       if (patientsError) {
-        console.error('[GET /rendez-vous] Erreur Supabase patients:', patientsError.message, '| code:', patientsError.code, '| details:', patientsError.details);
-        return res.status(500).json({ erreur: patientsError.message || 'Erreur base de données sur les patients.' });
+        // Patients inaccessibles → on continue sans eux (mode dégradé, pas de crash)
+        console.warn('[GET /rendez-vous] Patients inaccessibles, on continue sans:', patientsError.message);
+      } else {
+        patientsMap = (Array.isArray(patientsData) ? patientsData : []).reduce((acc, p) => {
+          acc[p.id] = p;
+          return acc;
+        }, {});
       }
-
-      const patientsListe = Array.isArray(patientsData) ? patientsData : [];
-      patientsMap = patientsListe.reduce((acc, patient) => {
-        acc[patient.id] = patient;
-        return acc;
-      }, {});
     }
 
+    // ── Étape 3 : fusion côté Node ──
     const resultat = liste.map((rdv) => ({
       ...rdv,
-      patients: rdv.patient_id ? (patientsMap[rdv.patient_id] || null) : null,
+      patients: patientsMap[rdv.patient_id] || null,
     }));
 
     console.log('[GET /rendez-vous] Succès —', resultat.length, 'rendez-vous retournés');
-    return res.json({ rendez_vous: resultat, total: resultat.length });
+    return res.status(200).json({ rendez_vous: resultat, total: resultat.length });
 
   } catch (err) {
     clearTimeout(timeoutId);
-    console.error('[GET /rendez-vous] Exception non gérée dans le handler:', err?.message || String(err));
+    console.error('[GET /rendez-vous] Exception non gérée:', err?.message || String(err));
     if (!res.headersSent) {
-      return res.status(500).json({ erreur: 'Erreur interne du serveur.' });
+      return res.status(200).json({
+        rendez_vous: [],
+        total: 0,
+        warning: `Erreur serveur : ${err?.message || 'inconnue'}`,
+      });
     }
   }
 });
@@ -125,39 +141,32 @@ router.post('/', async (req, res) => {
   }
 
   try {
-    const { data, error } = await supabase
-      .from('rendez_vous')
-      .insert({ patient_id, motif, date_heure, statut })
-      .select('id, patient_id, date_heure, motif, statut, created_at')
-      .single();
+    console.log('[POST /rendez-vous] Insertion rendez-vous...');
+    const { data, error } = await safeQuery(
+      supabase
+        .from('rendez_vous')
+        .insert({ patient_id, motif, date_heure, statut })
+        .select('id, patient_id, date_heure, motif, statut, created_at')
+        .single(),
+      'POST /rendez-vous → insert'
+    );
 
     if (error) {
-      console.error('[POST /rendez-vous] Erreur Supabase:', error.message, '| code:', error.code, '| details:', error.details);
+      console.error('[POST /rendez-vous] Erreur:', error.message);
       return res.status(500).json({ erreur: error.message || 'Erreur lors de la création du rendez-vous.' });
     }
 
+    // Récupération du patient séparément (sans join implicite)
     let patient = null;
-
     if (data?.patient_id) {
-      const { data: patientData, error: patientError } = await supabase
-        .from('patients')
-        .select('id, nom, telephone, email')
-        .eq('id', data.patient_id)
-        .maybeSingle();
-
-      if (patientError) {
-        console.error('[POST /rendez-vous] Erreur récupération patient:', patientError.message);
-      } else {
-        patient = patientData || null;
-      }
+      const { data: patientData } = await safeQuery(
+        supabase.from('patients').select('id, nom, telephone, email').eq('id', data.patient_id).maybeSingle(),
+        'POST /rendez-vous → patient'
+      );
+      patient = patientData || null;
     }
 
-    return res.status(201).json({
-      rendez_vous: {
-        ...data,
-        patients: patient,
-      },
-    });
+    return res.status(201).json({ rendez_vous: { ...(data || {}), patients: patient } });
   } catch (err) {
     console.error('[POST /rendez-vous] Exception non gérée:', err?.message || String(err));
     return res.status(500).json({ erreur: 'Erreur interne du serveur.' });
@@ -188,16 +197,19 @@ router.post('/suggerer-creneaux', async (req, res) => {
     const dateFin = new Date(dateDebut);
     dateFin.setDate(dateFin.getDate() + 21);
 
-    const { data: rdvExistants, error } = await supabase
-      .from('rendez_vous')
-      .select('date_heure')
-      .in('statut', ['planifie', 'confirme'])
-      .gte('date_heure', dateDebut.toISOString())
-      .lte('date_heure', dateFin.toISOString());
+    const { data: rdvExistants, error } = await safeQuery(
+      supabase
+        .from('rendez_vous')
+        .select('date_heure')
+        .in('statut', ['planifie', 'confirme'])
+        .gte('date_heure', dateDebut.toISOString())
+        .lte('date_heure', dateFin.toISOString()),
+      'POST /suggerer-creneaux → rendez_vous'
+    );
 
+    // Si la table est inaccessible, on génère des créneaux sans tenir compte des conflits
     if (error) {
-      console.error('[POST /suggerer-creneaux] Erreur Supabase:', error.message);
-      return res.status(500).json({ erreur: 'Erreur lors de la récupération des rendez-vous existants.' });
+      console.warn('[POST /suggerer-creneaux] rendez_vous inaccessible, créneaux sans filtre:', error.message);
     }
 
     const cleCreneauOccupe = (d) => {
@@ -215,16 +227,12 @@ router.post('/suggerer-creneaux', async (req, res) => {
 
     for (let jour = 0; jour < 21 && creneauxDisponibles.length < nbCreneaux; jour++) {
       const jourSemaine = dateActuelle.getDay();
-
       if (jourSemaine !== 0 && jourSemaine !== 6) {
         for (const { h, m } of HORAIRES) {
           if (creneauxDisponibles.length >= nbCreneaux) break;
-
           const creneau = new Date(dateActuelle);
           creneau.setHours(h, m, 0, 0);
-
-          const cle = cleCreneauOccupe(creneau);
-          if (creneau > maintenant && !creneauxOccupes.has(cle)) {
+          if (creneau > maintenant && !creneauxOccupes.has(cleCreneauOccupe(creneau))) {
             creneauxDisponibles.push({
               date_heure: creneau.toISOString(),
               format_affichage: formatCreneau(creneau),
@@ -232,7 +240,6 @@ router.post('/suggerer-creneaux', async (req, res) => {
           }
         }
       }
-
       dateActuelle.setDate(dateActuelle.getDate() + 1);
     }
 

@@ -28,8 +28,6 @@ function formatCreneau(date) {
 router.get('/', async (req, res) => {
   console.log('[GET /rendez-vous] Requête reçue — query:', JSON.stringify(req.query));
 
-  // Timeout explicite : si Supabase ne répond pas en 9s, on répond nous-mêmes
-  // (Railway timeout = 30s → on coupe avant pour éviter le 503)
   const timeoutId = setTimeout(() => {
     if (!res.headersSent) {
       console.error('[GET /rendez-vous] TIMEOUT — Supabase ne répond pas après 9s');
@@ -40,19 +38,9 @@ router.get('/', async (req, res) => {
   try {
     const { patient_id } = req.query;
 
-    console.log('[GET /rendez-vous] Construction requête Supabase...');
-
     let queryBuilder = supabase
       .from('rendez_vous')
-      .select(`
-        id,
-        patient_id,
-        date_heure,
-        motif,
-        statut,
-        created_at,
-        patients ( id, nom, telephone, email )
-      `)
+      .select('id, patient_id, date_heure, motif, statut, created_at')
       .order('date_heure', { ascending: true });
 
     if (patient_id) {
@@ -60,42 +48,59 @@ router.get('/', async (req, res) => {
       queryBuilder = queryBuilder.eq('patient_id', patient_id);
     }
 
-    // Requête Supabase isolée dans son propre try/catch
-    let data = null;
-    let error = null;
-
-    try {
-      console.log('[GET /rendez-vous] Envoi requête Supabase...');
-      const result = await queryBuilder;
-      data = result.data;
-      error = result.error;
-      console.log('[GET /rendez-vous] Réponse reçue — isArray:', Array.isArray(data), '| data:', data === null ? 'null' : `${Array.isArray(data) ? data.length : '?'} éléments`, '| error:', error ? JSON.stringify(error) : 'aucune');
-    } catch (queryException) {
-      console.error('[GET /rendez-vous] Exception pendant la requête Supabase:', queryException?.message || String(queryException));
-      clearTimeout(timeoutId);
-      if (!res.headersSent) {
-        return res.status(500).json({ erreur: 'Erreur lors de la requête base de données.' });
-      }
-      return;
-    }
+    console.log('[GET /rendez-vous] Envoi requête Supabase sur rendez_vous...');
+    const { data, error } = await queryBuilder;
 
     clearTimeout(timeoutId);
 
-    // Vérification : la réponse timeout n'a peut-être déjà été envoyée
     if (res.headersSent) {
-      console.warn('[GET /rendez-vous] Réponse déjà envoyée (timeout déclenché), abandon.');
+      console.warn('[GET /rendez-vous] Réponse déjà envoyée, abandon.');
       return;
     }
 
     if (error) {
-      console.error('[GET /rendez-vous] Erreur Supabase:', error.message, '| code:', error.code, '| details:', error.details);
+      console.error('[GET /rendez-vous] Erreur Supabase rendez_vous:', error.message, '| code:', error.code, '| details:', error.details);
       return res.status(500).json({ erreur: error.message || 'Erreur base de données.' });
     }
 
-    // Protection finale : data null ou non-tableau
     const liste = Array.isArray(data) ? data : [];
-    console.log('[GET /rendez-vous] Succès —', liste.length, 'rendez-vous retournés');
-    return res.json({ rendez_vous: liste, total: liste.length });
+    console.log('[GET /rendez-vous] Rendez-vous récupérés:', liste.length);
+
+    const patientIds = [...new Set(
+      liste
+        .map((rdv) => rdv.patient_id)
+        .filter(Boolean)
+    )];
+
+    let patientsMap = {};
+
+    if (patientIds.length > 0) {
+      console.log('[GET /rendez-vous] Récupération patients liés:', patientIds.length);
+
+      const { data: patientsData, error: patientsError } = await supabase
+        .from('patients')
+        .select('id, nom, telephone, email')
+        .in('id', patientIds);
+
+      if (patientsError) {
+        console.error('[GET /rendez-vous] Erreur Supabase patients:', patientsError.message, '| code:', patientsError.code, '| details:', patientsError.details);
+        return res.status(500).json({ erreur: patientsError.message || 'Erreur base de données sur les patients.' });
+      }
+
+      const patientsListe = Array.isArray(patientsData) ? patientsData : [];
+      patientsMap = patientsListe.reduce((acc, patient) => {
+        acc[patient.id] = patient;
+        return acc;
+      }, {});
+    }
+
+    const resultat = liste.map((rdv) => ({
+      ...rdv,
+      patients: rdv.patient_id ? (patientsMap[rdv.patient_id] || null) : null,
+    }));
+
+    console.log('[GET /rendez-vous] Succès —', resultat.length, 'rendez-vous retournés');
+    return res.json({ rendez_vous: resultat, total: resultat.length });
 
   } catch (err) {
     clearTimeout(timeoutId);
@@ -123,23 +128,36 @@ router.post('/', async (req, res) => {
     const { data, error } = await supabase
       .from('rendez_vous')
       .insert({ patient_id, motif, date_heure, statut })
-      .select(`
-        id,
-        patient_id,
-        date_heure,
-        motif,
-        statut,
-        created_at,
-        patients ( id, nom, telephone, email )
-      `)
+      .select('id, patient_id, date_heure, motif, statut, created_at')
       .single();
 
     if (error) {
-      console.error('[POST /rendez-vous] Erreur Supabase:', error.message);
-      return res.status(500).json({ erreur: 'Erreur lors de la création du rendez-vous.' });
+      console.error('[POST /rendez-vous] Erreur Supabase:', error.message, '| code:', error.code, '| details:', error.details);
+      return res.status(500).json({ erreur: error.message || 'Erreur lors de la création du rendez-vous.' });
     }
 
-    return res.status(201).json({ rendez_vous: data ?? {} });
+    let patient = null;
+
+    if (data?.patient_id) {
+      const { data: patientData, error: patientError } = await supabase
+        .from('patients')
+        .select('id, nom, telephone, email')
+        .eq('id', data.patient_id)
+        .maybeSingle();
+
+      if (patientError) {
+        console.error('[POST /rendez-vous] Erreur récupération patient:', patientError.message);
+      } else {
+        patient = patientData || null;
+      }
+    }
+
+    return res.status(201).json({
+      rendez_vous: {
+        ...data,
+        patients: patient,
+      },
+    });
   } catch (err) {
     console.error('[POST /rendez-vous] Exception non gérée:', err?.message || String(err));
     return res.status(500).json({ erreur: 'Erreur interne du serveur.' });

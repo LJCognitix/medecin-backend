@@ -14,23 +14,13 @@ const compteRenduRoutes = require('./routes/compteRendu');
 
 const app = express();
 
-const allowedOrigins = [
-  'https://medecin-front-eight.vercel.app',
-  'http://localhost:5173',
-  'http://localhost:3000',
-];
-
+/**
+ * 🔥 CORS PERMISSIF (fix bug Railway / Vercel / WebContainer)
+ * Accepte toutes les origines pour éviter les blocages
+ */
 app.use(cors({
-  origin: function (origin, callback) {
-    // Autorise les requêtes sans origin (Postman, curl, health checks, navigateur direct)
-    if (!origin) return callback(null, true);
-
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-
-    return callback(new Error(`Origine non autorisée par CORS : ${origin}`));
-  },
+  origin: true,
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
@@ -47,6 +37,8 @@ app.get('/', (req, res) => {
       'POST /api/patients',
       'GET  /api/consultations',
       'POST /api/consultations',
+      'GET  /api/rendez-vous',
+      'POST /api/rendez-vous',
       'POST /api/transcription',
       'POST /api/compte-rendu',
       'POST /api/demandes/generer-reponse',
@@ -86,11 +78,6 @@ app.use((req, res) => {
 // Gestion globale des erreurs
 app.use((err, req, res, next) => {
   console.error('Erreur non gérée :', err.stack || err.message || err);
-
-  if (err.message && err.message.startsWith('Origine non autorisée par CORS')) {
-    return res.status(403).json({ erreur: err.message });
-  }
-
   res.status(500).json({ erreur: 'Erreur interne du serveur.' });
 });
 

@@ -8,7 +8,6 @@ const MOIS_FR = [
   'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre',
 ];
 
-// Créneaux horaires du cabinet : 9h-12h et 14h-18h, slots de 30 min
 const HORAIRES = [
   { h: 9, m: 0 }, { h: 9, m: 30 },
   { h: 10, m: 0 }, { h: 10, m: 30 },
@@ -24,6 +23,82 @@ function formatCreneau(date) {
   const m = String(date.getMinutes()).padStart(2, '0');
   return `${JOURS_FR[date.getDay()]} ${date.getDate()} ${MOIS_FR[date.getMonth()]} à ${h}:${m}`;
 }
+
+// GET /api/rendez-vous — liste des rendez-vous avec info patient
+router.get('/', async (req, res) => {
+  try {
+    const { patient_id } = req.query;
+
+    let query = supabase
+      .from('rendez_vous')
+      .select(`
+        id,
+        patient_id,
+        date_heure,
+        motif,
+        statut,
+        created_at,
+        patients ( id, nom, telephone, email )
+      `)
+      .order('date_heure', { ascending: true });
+
+    if (patient_id) {
+      query = query.eq('patient_id', patient_id);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error('Erreur Supabase :', error.message);
+      return res.status(500).json({ erreur: 'Erreur lors de la récupération des rendez-vous.' });
+    }
+
+    res.json({ rendez_vous: data, total: data.length });
+  } catch (error) {
+    console.error('Erreur GET /rendez-vous :', error);
+    res.status(500).json({ erreur: 'Erreur interne du serveur.' });
+  }
+});
+
+// POST /api/rendez-vous — créer un rendez-vous
+router.post('/', async (req, res) => {
+  const { patient_id, motif, date_heure, statut = 'planifie' } = req.body;
+
+  if (!patient_id || !motif || !date_heure) {
+    return res.status(400).json({ erreur: 'Les champs patient_id, motif et date_heure sont requis.' });
+  }
+
+  const statutsValides = ['planifie', 'confirme', 'annule', 'termine'];
+  if (!statutsValides.includes(statut)) {
+    return res.status(400).json({ erreur: `Statut invalide. Valeurs acceptées : ${statutsValides.join(', ')}.` });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('rendez_vous')
+      .insert({ patient_id, motif, date_heure, statut })
+      .select(`
+        id,
+        patient_id,
+        date_heure,
+        motif,
+        statut,
+        created_at,
+        patients ( id, nom, telephone, email )
+      `)
+      .single();
+
+    if (error) {
+      console.error('Erreur Supabase :', error.message);
+      return res.status(500).json({ erreur: 'Erreur lors de la création du rendez-vous.' });
+    }
+
+    res.status(201).json({ rendez_vous: data });
+  } catch (error) {
+    console.error('Erreur POST /rendez-vous :', error);
+    res.status(500).json({ erreur: 'Erreur interne du serveur.' });
+  }
+});
 
 // POST /api/rendez-vous/suggerer-creneaux
 router.post('/suggerer-creneaux', async (req, res) => {
@@ -50,7 +125,6 @@ router.post('/suggerer-creneaux', async (req, res) => {
   }
 
   try {
-    // Récupérer les RDV occupés sur les 21 prochains jours
     const dateDebut = new Date(dateRef);
     dateDebut.setHours(0, 0, 0, 0);
     const dateFin = new Date(dateDebut);
@@ -68,7 +142,6 @@ router.post('/suggerer-creneaux', async (req, res) => {
       return res.status(500).json({ erreur: 'Erreur lors de la récupération des rendez-vous existants.' });
     }
 
-    // Normaliser les créneaux occupés (clé: "YYYY-MM-DD-HH-mm")
     const cleCreneauOccupe = (d) => {
       const date = new Date(d);
       return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}-${date.getHours()}-${date.getMinutes()}`;
@@ -85,7 +158,6 @@ router.post('/suggerer-creneaux', async (req, res) => {
     for (let jour = 0; jour < 21 && creneauxDisponibles.length < nbCreneaux; jour++) {
       const jourSemaine = dateActuelle.getDay();
 
-      // Ignorer samedi (6) et dimanche (0)
       if (jourSemaine !== 0 && jourSemaine !== 6) {
         for (const { h, m } of HORAIRES) {
           if (creneauxDisponibles.length >= nbCreneaux) break;

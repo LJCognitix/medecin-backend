@@ -1,17 +1,14 @@
 const express = require('express');
 const router = express.Router();
-const supabase = require('../config/supabase');
 const { genererTexteIA } = require('../services/openai');
 
-// POST /api/compte-rendu — structure un texte libre en compte rendu médical et sauvegarde
+// POST /api/compte-rendu — analyse un texte et retourne un compte rendu structuré (sans sauvegarde)
+// La sauvegarde se fait séparément via POST /api/consultations
 router.post('/', async (req, res) => {
-  const { texte_brut, patient_id, rendez_vous_id } = req.body;
+  const { texte_brut } = req.body;
 
   if (!texte_brut) {
     return res.status(400).json({ erreur: 'Le champ texte_brut est requis.' });
-  }
-  if (!patient_id) {
-    return res.status(400).json({ erreur: 'Le champ patient_id est requis.' });
   }
   if (texte_brut.trim().length < 10) {
     return res.status(400).json({ erreur: 'Le texte est trop court pour générer un compte rendu.' });
@@ -52,38 +49,15 @@ Extrais : le motif de consultation, les symptômes rapportés ou observés, le d
       };
     }
 
-    // Sauvegarder dans Supabase
-    const { data, error } = await supabase
-      .from('comptes_rendus')
-      .insert({
-        patient_id,
-        rendez_vous_id: rendez_vous_id || null,
-        texte_brut,
-        motif: structured.motif,
-        symptomes: structured.symptomes,
-        diagnostic: structured.diagnostic,
-        traitement: structured.traitement,
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error('Erreur Supabase :', error.message);
-      return res.status(500).json({ erreur: 'Erreur lors de la sauvegarde du compte rendu.' });
-    }
-
-    res.status(201).json({
-      id: data.id,
-      patient_id: data.patient_id,
-      motif: data.motif,
-      symptomes: data.symptomes,
-      diagnostic: data.diagnostic,
-      traitement: data.traitement,
-      created_at: data.created_at,
+    res.json({
+      motif: structured.motif,
+      symptomes: structured.symptomes,
+      diagnostic: structured.diagnostic,
+      traitement: structured.traitement,
     });
   } catch (error) {
     console.error('Erreur POST /compte-rendu :', error);
-    res.status(500).json({ erreur: 'Erreur lors de la génération du compte rendu.' });
+    res.status(500).json({ erreur: 'Erreur lors de l\'analyse du compte rendu.' });
   }
 });
 

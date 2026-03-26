@@ -40,7 +40,7 @@ router.post('/', upload.single('audio'), async (req, res) => {
       response_format: 'text',
     });
 
-    res.json({ transcription });
+    res.json({ texte: transcription });
   } catch (error) {
     console.error('Erreur Whisper :', error.message);
     res.status(500).json({ erreur: 'Erreur lors de la transcription audio.' });

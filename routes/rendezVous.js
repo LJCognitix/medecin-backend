@@ -26,12 +26,23 @@ function formatCreneau(date) {
 
 // GET /api/rendez-vous — liste des rendez-vous avec info patient
 router.get('/', async (req, res) => {
-  console.log('[GET /api/rendez-vous] Requête reçue — query:', req.query);
+  console.log('[GET /rendez-vous] Requête reçue — query:', JSON.stringify(req.query));
+
+  // Timeout explicite : si Supabase ne répond pas en 9s, on répond nous-mêmes
+  // (Railway timeout = 30s → on coupe avant pour éviter le 503)
+  const timeoutId = setTimeout(() => {
+    if (!res.headersSent) {
+      console.error('[GET /rendez-vous] TIMEOUT — Supabase ne répond pas après 9s');
+      res.status(504).json({ erreur: 'La base de données ne répond pas. Réessayez dans quelques secondes.' });
+    }
+  }, 9000);
 
   try {
     const { patient_id } = req.query;
 
-    let query = supabase
+    console.log('[GET /rendez-vous] Construction requête Supabase...');
+
+    let queryBuilder = supabase
       .from('rendez_vous')
       .select(`
         id,
@@ -45,28 +56,53 @@ router.get('/', async (req, res) => {
       .order('date_heure', { ascending: true });
 
     if (patient_id) {
-      console.log('[GET /api/rendez-vous] Filtre patient_id:', patient_id);
-      query = query.eq('patient_id', patient_id);
+      console.log('[GET /rendez-vous] Filtre patient_id:', patient_id);
+      queryBuilder = queryBuilder.eq('patient_id', patient_id);
     }
 
-    const { data, error } = await query;
+    // Requête Supabase isolée dans son propre try/catch
+    let data = null;
+    let error = null;
 
-    console.log('[GET /api/rendez-vous] Réponse Supabase — data:', data ? `${data.length} entrées` : 'null', '| error:', error ? error.message : 'aucune');
+    try {
+      console.log('[GET /rendez-vous] Envoi requête Supabase...');
+      const result = await queryBuilder;
+      data = result.data;
+      error = result.error;
+      console.log('[GET /rendez-vous] Réponse reçue — isArray:', Array.isArray(data), '| data:', data === null ? 'null' : `${Array.isArray(data) ? data.length : '?'} éléments`, '| error:', error ? JSON.stringify(error) : 'aucune');
+    } catch (queryException) {
+      console.error('[GET /rendez-vous] Exception pendant la requête Supabase:', queryException?.message || String(queryException));
+      clearTimeout(timeoutId);
+      if (!res.headersSent) {
+        return res.status(500).json({ erreur: 'Erreur lors de la requête base de données.' });
+      }
+      return;
+    }
+
+    clearTimeout(timeoutId);
+
+    // Vérification : la réponse timeout n'a peut-être déjà été envoyée
+    if (res.headersSent) {
+      console.warn('[GET /rendez-vous] Réponse déjà envoyée (timeout déclenché), abandon.');
+      return;
+    }
 
     if (error) {
-      console.error('[GET /api/rendez-vous] Erreur Supabase:', error.message, '| code:', error.code);
-      return res.status(500).json({ erreur: 'Erreur lors de la récupération des rendez-vous.' });
+      console.error('[GET /rendez-vous] Erreur Supabase:', error.message, '| code:', error.code, '| details:', error.details);
+      return res.status(500).json({ erreur: error.message || 'Erreur base de données.' });
     }
 
-    // Sécurité : data peut être null si Supabase ne retourne rien (timeout, RLS, table vide)
+    // Protection finale : data null ou non-tableau
     const liste = Array.isArray(data) ? data : [];
-
-    console.log('[GET /api/rendez-vous] Succès —', liste.length, 'rendez-vous retournés');
+    console.log('[GET /rendez-vous] Succès —', liste.length, 'rendez-vous retournés');
     return res.json({ rendez_vous: liste, total: liste.length });
 
   } catch (err) {
-    console.error('[GET /api/rendez-vous] Exception non gérée:', err.message || err);
-    return res.status(500).json({ erreur: 'Erreur interne du serveur.' });
+    clearTimeout(timeoutId);
+    console.error('[GET /rendez-vous] Exception non gérée dans le handler:', err?.message || String(err));
+    if (!res.headersSent) {
+      return res.status(500).json({ erreur: 'Erreur interne du serveur.' });
+    }
   }
 });
 
@@ -99,14 +135,14 @@ router.post('/', async (req, res) => {
       .single();
 
     if (error) {
-      console.error('Erreur Supabase :', error.message);
+      console.error('[POST /rendez-vous] Erreur Supabase:', error.message);
       return res.status(500).json({ erreur: 'Erreur lors de la création du rendez-vous.' });
     }
 
-    res.status(201).json({ rendez_vous: data });
-  } catch (error) {
-    console.error('Erreur POST /rendez-vous :', error);
-    res.status(500).json({ erreur: 'Erreur interne du serveur.' });
+    return res.status(201).json({ rendez_vous: data ?? {} });
+  } catch (err) {
+    console.error('[POST /rendez-vous] Exception non gérée:', err?.message || String(err));
+    return res.status(500).json({ erreur: 'Erreur interne du serveur.' });
   }
 });
 
@@ -115,23 +151,17 @@ router.post('/suggerer-creneaux', async (req, res) => {
   const { date_reference, nombre_creneaux = 3 } = req.body;
 
   if (!date_reference) {
-    return res.status(400).json({
-      erreur: 'Le champ date_reference est requis (format ISO : YYYY-MM-DD).',
-    });
+    return res.status(400).json({ erreur: 'Le champ date_reference est requis (format ISO : YYYY-MM-DD).' });
   }
 
   const dateRef = new Date(date_reference);
   if (isNaN(dateRef.getTime())) {
-    return res.status(400).json({
-      erreur: 'Format de date invalide. Utilisez le format ISO : YYYY-MM-DD.',
-    });
+    return res.status(400).json({ erreur: 'Format de date invalide. Utilisez le format ISO : YYYY-MM-DD.' });
   }
 
   const nbCreneaux = parseInt(nombre_creneaux, 10);
   if (isNaN(nbCreneaux) || nbCreneaux < 1 || nbCreneaux > 10) {
-    return res.status(400).json({
-      erreur: 'Le nombre de créneaux doit être un entier entre 1 et 10.',
-    });
+    return res.status(400).json({ erreur: 'Le nombre de créneaux doit être un entier entre 1 et 10.' });
   }
 
   try {
@@ -148,7 +178,7 @@ router.post('/suggerer-creneaux', async (req, res) => {
       .lte('date_heure', dateFin.toISOString());
 
     if (error) {
-      console.error('Erreur Supabase :', error.message);
+      console.error('[POST /suggerer-creneaux] Erreur Supabase:', error.message);
       return res.status(500).json({ erreur: 'Erreur lors de la récupération des rendez-vous existants.' });
     }
 
@@ -158,7 +188,7 @@ router.post('/suggerer-creneaux', async (req, res) => {
     };
 
     const creneauxOccupes = new Set(
-      (rdvExistants || []).map((rdv) => cleCreneauOccupe(rdv.date_heure))
+      (Array.isArray(rdvExistants) ? rdvExistants : []).map((rdv) => cleCreneauOccupe(rdv.date_heure))
     );
 
     const maintenant = new Date();
@@ -188,10 +218,10 @@ router.post('/suggerer-creneaux', async (req, res) => {
       dateActuelle.setDate(dateActuelle.getDate() + 1);
     }
 
-    res.json({ creneaux: creneauxDisponibles });
-  } catch (error) {
-    console.error('Erreur /rendez-vous/suggerer-creneaux :', error);
-    res.status(500).json({ erreur: 'Erreur lors de la suggestion des créneaux.' });
+    return res.json({ creneaux: creneauxDisponibles });
+  } catch (err) {
+    console.error('[POST /suggerer-creneaux] Exception non gérée:', err?.message || String(err));
+    return res.status(500).json({ erreur: 'Erreur lors de la suggestion des créneaux.' });
   }
 });
 

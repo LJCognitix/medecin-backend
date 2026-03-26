@@ -14,15 +14,27 @@ const compteRenduRoutes = require('./routes/compteRendu');
 
 const app = express();
 
+const allowedOrigins = [
+  'https://medecin-front-eight.vercel.app',
+  'http://localhost:5173',
+  'http://localhost:3000',
+];
+
 app.use(cors({
-  origin: [
-    'https://medecin-front-eight.vercel.app',
-    'http://localhost:5173',
-    'http://localhost:3000',
-  ],
+  origin: function (origin, callback) {
+    // Autorise les requêtes sans origin (Postman, curl, health checks, navigateur direct)
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error(`Origine non autorisée par CORS : ${origin}`));
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
+
 app.use(express.json());
 
 // Santé du serveur
@@ -46,6 +58,13 @@ app.get('/', (req, res) => {
   });
 });
 
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    service: 'medecin-backend',
+  });
+});
+
 // Routes
 app.use('/api/patients', patientsRoutes);
 app.use('/api/consultations', consultationsRoutes);
@@ -59,16 +78,23 @@ app.use('/api/dashboard', dashboardRoutes);
 
 // Route inconnue
 app.use((req, res) => {
-  res.status(404).json({ erreur: `Route introuvable : ${req.method} ${req.path}` });
+  res.status(404).json({
+    erreur: `Route introuvable : ${req.method} ${req.path}`,
+  });
 });
 
 // Gestion globale des erreurs
 app.use((err, req, res, next) => {
-  console.error('Erreur non gérée :', err.stack);
+  console.error('Erreur non gérée :', err.stack || err.message || err);
+
+  if (err.message && err.message.startsWith('Origine non autorisée par CORS')) {
+    return res.status(403).json({ erreur: err.message });
+  }
+
   res.status(500).json({ erreur: 'Erreur interne du serveur.' });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Serveur lancé sur http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Serveur lancé sur le port ${PORT}`);
 });

@@ -26,6 +26,8 @@ function formatCreneau(date) {
 
 // GET /api/rendez-vous — liste des rendez-vous avec info patient
 router.get('/', async (req, res) => {
+  console.log('[GET /api/rendez-vous] Requête reçue — query:', req.query);
+
   try {
     const { patient_id } = req.query;
 
@@ -43,20 +45,28 @@ router.get('/', async (req, res) => {
       .order('date_heure', { ascending: true });
 
     if (patient_id) {
+      console.log('[GET /api/rendez-vous] Filtre patient_id:', patient_id);
       query = query.eq('patient_id', patient_id);
     }
 
     const { data, error } = await query;
 
+    console.log('[GET /api/rendez-vous] Réponse Supabase — data:', data ? `${data.length} entrées` : 'null', '| error:', error ? error.message : 'aucune');
+
     if (error) {
-      console.error('Erreur Supabase :', error.message);
+      console.error('[GET /api/rendez-vous] Erreur Supabase:', error.message, '| code:', error.code);
       return res.status(500).json({ erreur: 'Erreur lors de la récupération des rendez-vous.' });
     }
 
-    res.json({ rendez_vous: data, total: data.length });
-  } catch (error) {
-    console.error('Erreur GET /rendez-vous :', error);
-    res.status(500).json({ erreur: 'Erreur interne du serveur.' });
+    // Sécurité : data peut être null si Supabase ne retourne rien (timeout, RLS, table vide)
+    const liste = Array.isArray(data) ? data : [];
+
+    console.log('[GET /api/rendez-vous] Succès —', liste.length, 'rendez-vous retournés');
+    return res.json({ rendez_vous: liste, total: liste.length });
+
+  } catch (err) {
+    console.error('[GET /api/rendez-vous] Exception non gérée:', err.message || err);
+    return res.status(500).json({ erreur: 'Erreur interne du serveur.' });
   }
 });
 
